@@ -64,12 +64,17 @@ impl<W: Write> Encoder<W> {
         Encoder { w: w, info: info }
     }
 
+    pub fn set_palette(&mut self, palette: Vec<u8>) {
+        self.info.palette = Some(palette);
+    }
+
     pub fn write_header(self) -> Result<Writer<W>> {
         Writer::new(self.w, self.info).init()
     }
 }
 
 impl<W: Write> HasParameters for Encoder<W> {}
+
 
 impl<W: Write> Parameter<Encoder<W>> for ColorType {
     fn set_param(self, this: &mut Encoder<W>) {
@@ -104,6 +109,17 @@ pub struct Writer<W: Write> {
     info: Info,
 }
 
+fn write_chunk<W: Write>(w: &mut W, name: [u8; 4], data: &[u8]) -> Result<()> {
+    w.write_be(data.len() as u32)?;
+    w.write_all(&name)?;
+    w.write_all(data)?;
+    let mut crc = Crc32::new();
+    crc.update(&name);
+    crc.update(data);
+    w.write_be(crc.finalize())?;
+    Ok(())
+}
+
 impl<W: Write> Writer<W> {
     fn new(w: W, info: Info) -> Writer<W> {
         let w = Writer { w: w, info: info };
@@ -119,18 +135,16 @@ impl<W: Write> Writer<W> {
         data[9] = self.info.color_type as u8;
         data[12] = if self.info.interlaced { 1 } else { 0 };
         self.write_chunk(chunk::IHDR, &data)?;
+
+        if let Some(p) = &self.info.palette {
+            write_chunk(&mut self.w, chunk::PLTE, p)?;
+        };
+
         Ok(self)
     }
 
     pub fn write_chunk(&mut self, name: [u8; 4], data: &[u8]) -> Result<()> {
-        self.w.write_be(data.len() as u32)?;
-        self.w.write_all(&name)?;
-        self.w.write_all(data)?;
-        let mut crc = Crc32::new();
-        crc.update(&name);
-        crc.update(data);
-        self.w.write_be(crc.finalize())?;
-        Ok(())
+        write_chunk(&mut self.w, name, data)
     }
 
     /// Writes the image data.
@@ -397,6 +411,60 @@ mod tests {
                 assert_eq!(buf, buf2);
             }
         }
+    }
+
+    #[test]
+    fn image_palette() -> Result<()> {
+        use bitbit::BitWriter;
+        let samples = 3;
+        for bit_depth in vec![1, 2, 4, 8] {
+            let path = format!("tests/pngsuite/basn3p0{}.png", bit_depth);
+            let decoder = crate::Decoder::new(File::open(&path).unwrap());
+            let (info, mut reader) = decoder.read_info().unwrap();
+            let palette: Vec<u8> = {
+                let palette = &reader.info().palette.clone().unwrap();
+                palette.to_vec()
+            };
+            let mut buf = vec![0; info.buffer_size()];
+            reader.next_frame(&mut buf).unwrap();
+
+            let mut bit = Vec::new();
+            {
+                let mut bw = BitWriter::new(&mut bit);
+                for i in 0..buf.len() / samples {
+                    for j in 0..palette.len() / samples {
+                        if buf[samples * i..samples * i + samples] ==
+                            palette[samples * j..samples * j + samples]
+                        {
+                            bw.write_bits(j as u32, bit_depth as usize).unwrap();
+                            break;
+                        }
+                    }
+                }
+
+                bw.pad_to_byte().unwrap();
+            };
+
+            let mut out = Vec::new();
+            {
+                let mut encoder = Encoder::new(&mut out, info.width, info.height);
+                encoder.set(BitDepth::from_u8(bit_depth).unwrap());
+                encoder.set(ColorType::Indexed);
+                encoder.set_palette(palette.clone());
+
+                let mut writer = encoder.write_header().unwrap();
+                writer.write_image_data(&bit).unwrap();
+            }
+
+            // Decode encoded decoded image
+            let decoder = crate::Decoder::new(&*out);
+            let (info, mut reader) = decoder.read_info().unwrap();
+            let mut buf2 = vec![0; info.buffer_size()];
+            reader.next_frame(&mut buf2).unwrap();
+            // check if the encoded image is ok:
+            assert_eq!(buf, buf2);
+        }
+        Ok(())
     }
 
     #[test]
