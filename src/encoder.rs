@@ -149,6 +149,11 @@ impl<W: Write> Writer<W> {
 
     /// Writes the image data.
     pub fn write_image_data(&mut self, data: &[u8]) -> Result<()> {
+        if self.info.color_type == ColorType::Indexed && self.info.palette.is_none() {
+            return Err(EncodingError::Format(
+                "can't write indexed image without palette".into())
+            );
+        }
         let bpp = self.info.bytes_per_pixel();
         let in_len = self.info.raw_row_length() - 1;
         let mut prev = vec![0; in_len];
